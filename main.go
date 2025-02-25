@@ -17,15 +17,16 @@ import (
 )
 
 const (
-	ScreenWidth   = 800
-	ScreenHeight  = 600
-	PlayerSpeed   = 3.0
-	BulletSpeed   = 6.0
-	PlayerRadius  = 10.0
-	BulletRadius  = 3.0
-	MaxHealth     = 100
-	ShootCooldown = 200 * time.Millisecond
-	ServerPort    = ":8080"
+	ScreenWidth             = 800
+	ScreenHeight            = 600
+	PlayerSpeed             = 1.0
+	PlayerSprintSpeedFactor = 1.7
+	BulletSpeed             = 6.0
+	PlayerRadius            = 10.0
+	BulletRadius            = 3.0
+	MaxHealth               = 100
+	ShootCooldown           = 200 * time.Millisecond
+	ServerPort              = ":8080"
 )
 
 type EventType string
@@ -53,6 +54,13 @@ type Bullet struct {
 	DY      float64 `json:"dy"`
 }
 
+type Obstacle struct {
+	X      float64
+	Y      float64
+	Width  float64
+	Height float64
+}
+
 type Event struct {
 	Type EventType       `json:"type"`
 	Data json.RawMessage `json:"data"`
@@ -73,10 +81,11 @@ type PlayerHit struct {
 }
 
 type Game struct {
-	player  *Player
-	players map[string]*Player
-	conn    net.Conn
-	mu      sync.Mutex
+	player    *Player
+	players   map[string]*Player
+	obstacles []*Obstacle
+	conn      net.Conn
+	mu        sync.Mutex
 }
 
 func NewPlayer(id string, x, y float64) *Player {
@@ -89,36 +98,66 @@ func NewPlayer(id string, x, y float64) *Player {
 	}
 }
 
-func (p *Player) Update() {
+func NewObstacles() []*Obstacle {
+	return []*Obstacle{
+		{X: 200, Y: 150, Width: 100, Height: 200},
+		{X: 500, Y: 300, Width: 150, Height: 100},
+	}
+}
+
+func (p *Player) Update(obstacles []*Obstacle) {
 	if p.Health <= 0 {
 		return
 	}
 
-	if ebiten.IsKeyPressed(ebiten.KeyW) {
-		p.Y -= PlayerSpeed
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyS) {
-		p.Y += PlayerSpeed
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyA) {
-		p.X -= PlayerSpeed
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyD) {
-		p.X += PlayerSpeed
+	moveX, moveY := 0.0, 0.0
+
+	movementSpeed := PlayerSpeed
+
+	if ebiten.IsKeyPressed(ebiten.KeyShiftLeft) {
+		movementSpeed *= PlayerSprintSpeedFactor
 	}
 
+	if ebiten.IsKeyPressed(ebiten.KeyW) {
+		moveY -= movementSpeed
+	}
+	if ebiten.IsKeyPressed(ebiten.KeyS) {
+		moveY += movementSpeed
+	}
+	if ebiten.IsKeyPressed(ebiten.KeyA) {
+		moveX -= movementSpeed
+	}
+	if ebiten.IsKeyPressed(ebiten.KeyD) {
+		moveX += movementSpeed
+	}
+
+	// Move horizontally and check collision
+	p.X += moveX
+	if collidesWithObstacles(p.X, p.Y, PlayerRadius, obstacles) {
+		p.X -= moveX // Revert horizontal movement if collides
+	}
+
+	// Move vertically and check collision
+	p.Y += moveY
+	if collidesWithObstacles(p.X, p.Y, PlayerRadius, obstacles) {
+		p.Y -= moveY // Revert vertical movement if collides
+	}
+
+	// Update aiming angle
 	mx, my := ebiten.CursorPosition()
 	dx, dy := float64(mx)-p.X, float64(my)-p.Y
 	p.Angle = math.Atan2(dy, dx)
 
+	// Shooting
 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) && time.Since(p.lastShot) > ShootCooldown {
 		p.Shoot()
 		p.lastShot = time.Now()
 	}
 
+	// Update bullets
 	for i := len(p.Bullets) - 1; i >= 0; i-- {
 		p.Bullets[i].Update()
-		if p.Bullets[i].OutOfBounds() {
+		if p.Bullets[i].OutOfBounds() || bulletHitsObstacle(p.Bullets[i], obstacles) {
 			p.Bullets = append(p.Bullets[:i], p.Bullets[i+1:]...)
 		}
 	}
@@ -144,11 +183,37 @@ func (b *Bullet) OutOfBounds() bool {
 	return b.X < 0 || b.X > ScreenWidth || b.Y < 0 || b.Y > ScreenHeight
 }
 
+func collidesWithObstacles(x, y, radius float64, obstacles []*Obstacle) bool {
+	for _, obstacle := range obstacles {
+		if circleRectCollision(x, y, radius, obstacle) {
+			return true
+		}
+	}
+	return false
+}
+
+func circleRectCollision(cx, cy, radius float64, rect *Obstacle) bool {
+	closestX := math.Max(rect.X, math.Min(cx, rect.X+rect.Width))
+	closestY := math.Max(rect.Y, math.Min(cy, rect.Y+rect.Height))
+	dx := cx - closestX
+	dy := cy - closestY
+	return (dx*dx + dy*dy) < (radius * radius)
+}
+
+func bulletHitsObstacle(b *Bullet, obstacles []*Obstacle) bool {
+	for _, obstacle := range obstacles {
+		if b.X >= obstacle.X && b.X <= obstacle.X+obstacle.Width && b.Y >= obstacle.Y && b.Y <= obstacle.Y+obstacle.Height {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *Game) Update() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	g.player.Update()
+	g.player.Update(g.obstacles)
 	g.checkBulletCollisions()
 	g.sendPlayerUpdate()
 	return nil
@@ -166,15 +231,7 @@ func (g *Game) checkBulletCollisions() {
 				if otherPlayer.Health < 0 {
 					otherPlayer.Health = 0
 				}
-
-				// Send hit event to notify other clients about the damage
-				hitEvent := PlayerHit{
-					VictimID: otherPlayer.ID,
-					Damage:   20,
-				}
-				g.sendEvent(EventTypePlayerHit, hitEvent)
-
-				// Remove bullet after hit
+				g.sendEvent(EventTypePlayerHit, PlayerHit{VictimID: otherPlayer.ID, Damage: 20})
 				g.player.Bullets = append(g.player.Bullets[:i], g.player.Bullets[i+1:]...)
 			}
 		}
@@ -186,6 +243,10 @@ func distance(x1, y1, x2, y2 float64) float64 {
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
+	for _, obstacle := range g.obstacles {
+		ebitenutil.DrawRect(screen, obstacle.X, obstacle.Y, obstacle.Width, obstacle.Height, color.RGBA{80, 80, 80, 255})
+	}
+
 	ebitenutil.DrawCircle(screen, g.player.X, g.player.Y, PlayerRadius, color.RGBA{0, 255, 0, 255})
 	ebitenutil.DebugPrint(screen, fmt.Sprintf("Health: %d", g.player.Health))
 
@@ -224,9 +285,7 @@ func (g *Game) sendPlayerUpdate() {
 }
 
 func (g *Game) sendEvent(eventType EventType, data interface{}) {
-	event := Event{
-		Type: eventType,
-	}
+	event := Event{Type: eventType}
 	eventData, err := json.Marshal(data)
 	if err != nil {
 		log.Println("Error marshaling event data:", err)
@@ -376,17 +435,17 @@ func main() {
 	defer conn.Close()
 
 	game := &Game{
-		player:  NewPlayer(playerID, ScreenWidth/2, ScreenHeight/2),
-		players: make(map[string]*Player),
-		conn:    conn,
+		player:    NewPlayer(playerID, ScreenWidth/2, ScreenHeight/2),
+		players:   make(map[string]*Player),
+		obstacles: NewObstacles(),
+		conn:      conn,
 	}
 
 	go game.listenForUpdates()
 
 	ebiten.SetWindowSize(ScreenWidth, ScreenHeight)
-	ebiten.SetWindowTitle("2D Multiplayer Top-Down Shooter")
+	ebiten.SetWindowTitle("2D Multiplayer Top-Down Shooter with Obstacles")
 	if err := ebiten.RunGame(game); err != nil {
 		log.Fatal(err)
 	}
 }
-
