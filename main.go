@@ -9,49 +9,97 @@ import (
 	"math"
 	"net"
 	"os"
+	"sort"
 	"sync"
-	"time"
+
+	"shooter/player"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
 const (
-	ScreenWidth             = 800
-	ScreenHeight            = 600
-	PlayerSpeed             = 1.0
-	PlayerSprintSpeedFactor = 1.7
-	BulletSpeed             = 6.0
-	PlayerRadius            = 10.0
-	BulletRadius            = 3.0
-	MaxHealth               = 100
-	ShootCooldown           = 200 * time.Millisecond
-	ServerPort              = ":8080"
+	ScreenWidth  = 1600
+	ScreenHeight = 900
+	ServerPort   = ":8080"
+
+	PlayerRadius = 10.0
+	BulletRadius = 3.0
+
+	// raycasting
+	RayCount       = 120    // Number of rays casted for visibility
+	RayLength      = 1600.0 // Maximum ray length
+	ObstacleBorder = 2.0
 )
 
-type EventType string
-
-const (
-	EventTypePlayerUpdate EventType = "player_update"
-	EventTypePlayerHit    EventType = "player_hit"
-)
-
-type Player struct {
-	ID       string    `json:"id"`
-	X        float64   `json:"x"`
-	Y        float64   `json:"y"`
-	Angle    float64   `json:"angle"`
-	Health   int       `json:"health"`
-	Bullets  []*Bullet `json:"bullets"`
-	lastShot time.Time `json:"-"`
+type line struct {
+	X1, Y1, X2, Y2 float64
 }
 
-type Bullet struct {
-	OwnerID string  `json:"owner_id"`
-	X       float64 `json:"x"`
-	Y       float64 `json:"y"`
-	DX      float64 `json:"dx"`
-	DY      float64 `json:"dy"`
+func newRay(x, y, length, angle float64) line {
+	return line{
+		X1: x,
+		Y1: y,
+		X2: x + length*math.Cos(angle),
+		Y2: y + length*math.Sin(angle),
+	}
+}
+
+func (l *line) angle() float64 {
+	return math.Atan2(l.Y2-l.Y1, l.X2-l.X1)
+}
+
+func rect(x, y, w, h float64) []line {
+	return []line{
+		{x, y, x, y + h},
+		{x, y + h, x + w, y + h},
+		{x + w, y + h, x + w, y},
+		{x + w, y, x, y},
+	}
+}
+
+func intersection(l1, l2 line) (float64, float64, bool) {
+	// https://en.wikipedia.org/wiki/Line%E2%80%93line_intersection#Given_two_points_on_each_line
+	denom := (l1.X1-l1.X2)*(l2.Y1-l2.Y2) - (l1.Y1-l1.Y2)*(l2.X1-l2.X2)
+	tNum := (l1.X1-l2.X1)*(l2.Y1-l2.Y2) - (l1.Y1-l2.Y1)*(l2.X1-l2.X2)
+	uNum := -((l1.X1-l1.X2)*(l1.Y1-l2.Y1) - (l1.Y1-l1.Y2)*(l1.X1-l2.X1))
+
+	if denom == 0 {
+		return 0, 0, false
+	}
+
+	t := tNum / denom
+	if t > 1 || t < 0 {
+		return 0, 0, false
+	}
+
+	u := uNum / denom
+	if u > 1 || u < 0 {
+		return 0, 0, false
+	}
+
+	x := l1.X1 + t*(l1.X2-l1.X1)
+	y := l1.Y1 + t*(l1.Y2-l1.Y1)
+	return x, y, true
+}
+
+type object struct {
+	walls []line
+}
+
+func (o object) points() [][2]float64 {
+	// Get one of the endpoints for all segments,
+	// + the startpoint of the first one, for non-closed paths
+	var points [][2]float64
+	for _, wall := range o.walls {
+		points = append(points, [2]float64{wall.X2, wall.Y2})
+	}
+	p := [2]float64{o.walls[0].X1, o.walls[0].Y1}
+	if p[0] != points[len(points)-1][0] && p[1] != points[len(points)-1][1] {
+		points = append(points, [2]float64{o.walls[0].X1, o.walls[0].Y1})
+	}
+	return points
 }
 
 type Obstacle struct {
@@ -61,18 +109,13 @@ type Obstacle struct {
 	Height float64
 }
 
-type Event struct {
-	Type EventType       `json:"type"`
-	Data json.RawMessage `json:"data"`
-}
-
 type PlayerUpdate struct {
-	ID      string    `json:"id"`
-	X       float64   `json:"x"`
-	Y       float64   `json:"y"`
-	Angle   float64   `json:"angle"`
-	Health  int       `json:"health"`
-	Bullets []*Bullet `json:"bullets"`
+	ID      string           `json:"id"`
+	X       float64          `json:"x"`
+	Y       float64          `json:"y"`
+	Angle   float64          `json:"angle"`
+	Health  int              `json:"health"`
+	Bullets []*player.Bullet `json:"bullets"`
 }
 
 type PlayerHit struct {
@@ -81,21 +124,12 @@ type PlayerHit struct {
 }
 
 type Game struct {
-	player    *Player
-	players   map[string]*Player
+	player    *player.Player
+	players   map[string]*player.Player
 	obstacles []*Obstacle
+	objects   []object
 	conn      net.Conn
 	mu        sync.Mutex
-}
-
-func NewPlayer(id string, x, y float64) *Player {
-	return &Player{
-		ID:      id,
-		X:       x,
-		Y:       y,
-		Health:  MaxHealth,
-		Bullets: []*Bullet{},
-	}
 }
 
 func NewObstacles() []*Obstacle {
@@ -103,84 +137,6 @@ func NewObstacles() []*Obstacle {
 		{X: 200, Y: 150, Width: 100, Height: 200},
 		{X: 500, Y: 300, Width: 150, Height: 100},
 	}
-}
-
-func (p *Player) Update(obstacles []*Obstacle) {
-	if p.Health <= 0 {
-		return
-	}
-
-	moveX, moveY := 0.0, 0.0
-
-	movementSpeed := PlayerSpeed
-
-	if ebiten.IsKeyPressed(ebiten.KeyShiftLeft) {
-		movementSpeed *= PlayerSprintSpeedFactor
-	}
-
-	if ebiten.IsKeyPressed(ebiten.KeyW) {
-		moveY -= movementSpeed
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyS) {
-		moveY += movementSpeed
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyA) {
-		moveX -= movementSpeed
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyD) {
-		moveX += movementSpeed
-	}
-
-	// Move horizontally and check collision
-	p.X += moveX
-	if collidesWithObstacles(p.X, p.Y, PlayerRadius, obstacles) {
-		p.X -= moveX // Revert horizontal movement if collides
-	}
-
-	// Move vertically and check collision
-	p.Y += moveY
-	if collidesWithObstacles(p.X, p.Y, PlayerRadius, obstacles) {
-		p.Y -= moveY // Revert vertical movement if collides
-	}
-
-	// Update aiming angle
-	mx, my := ebiten.CursorPosition()
-	dx, dy := float64(mx)-p.X, float64(my)-p.Y
-	p.Angle = math.Atan2(dy, dx)
-
-	// Shooting
-	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) && time.Since(p.lastShot) > ShootCooldown {
-		p.Shoot()
-		p.lastShot = time.Now()
-	}
-
-	// Update bullets
-	for i := len(p.Bullets) - 1; i >= 0; i-- {
-		p.Bullets[i].Update()
-		if p.Bullets[i].OutOfBounds() || bulletHitsObstacle(p.Bullets[i], obstacles) {
-			p.Bullets = append(p.Bullets[:i], p.Bullets[i+1:]...)
-		}
-	}
-}
-
-func (p *Player) Shoot() {
-	bullet := &Bullet{
-		OwnerID: p.ID,
-		X:       p.X + math.Cos(p.Angle)*PlayerRadius,
-		Y:       p.Y + math.Sin(p.Angle)*PlayerRadius,
-		DX:      math.Cos(p.Angle) * BulletSpeed,
-		DY:      math.Sin(p.Angle) * BulletSpeed,
-	}
-	p.Bullets = append(p.Bullets, bullet)
-}
-
-func (b *Bullet) Update() {
-	b.X += b.DX
-	b.Y += b.DY
-}
-
-func (b *Bullet) OutOfBounds() bool {
-	return b.X < 0 || b.X > ScreenWidth || b.Y < 0 || b.Y > ScreenHeight
 }
 
 func collidesWithObstacles(x, y, radius float64, obstacles []*Obstacle) bool {
@@ -200,20 +156,57 @@ func circleRectCollision(cx, cy, radius float64, rect *Obstacle) bool {
 	return (dx*dx + dy*dy) < (radius * radius)
 }
 
-func bulletHitsObstacle(b *Bullet, obstacles []*Obstacle) bool {
-	for _, obstacle := range obstacles {
-		if b.X >= obstacle.X && b.X <= obstacle.X+obstacle.Width && b.Y >= obstacle.Y && b.Y <= obstacle.Y+obstacle.Height {
-			return true
+func (g *Game) castRays(cx, cy float64, objects []object) []line {
+	rayLength := math.Hypot(float64(ScreenWidth), float64(ScreenHeight)) // something large enough to reach all objects
+
+	rays := []line{}
+
+	for _, obj := range objects {
+		// Cast two rays per point
+		for _, p := range obj.points() {
+			l := line{cx, cy, p[0], p[1]}
+			angle := l.angle()
+
+			for _, offset := range []float64{-0.001, 0.001} {
+				points := [][2]float64{}
+				ray := newRay(cx, cy, rayLength, angle+offset)
+
+				// Unpack all objects
+				for _, o := range objects {
+					for _, wall := range o.walls {
+						if px, py, ok := intersection(ray, wall); ok {
+							points = append(points, [2]float64{px, py})
+						}
+					}
+				}
+
+				// Find the point closest to start of ray
+				min := math.Inf(1)
+				minI := 0
+				for i, p := range points {
+					d2 := (cx-p[0])*(cx-p[0]) + (cy-p[1])*(cy-p[1])
+					if d2 < min {
+						min = d2
+						minI = i
+					}
+				}
+				if minI < len(points) {
+					rays = append(rays, line{cx, cy, points[minI][0], points[minI][1]})
+				}
+			}
 		}
 	}
-	return false
+	sort.Slice(rays, func(i int, j int) bool {
+		return rays[i].angle() < rays[j].angle()
+	})
+	return rays
 }
 
 func (g *Game) Update() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	g.player.Update(g.obstacles)
+	g.player.Update()
 	g.checkBulletCollisions()
 	g.sendPlayerUpdate()
 	return nil
@@ -226,46 +219,163 @@ func (g *Game) checkBulletCollisions() {
 		}
 		for i := len(g.player.Bullets) - 1; i >= 0; i-- {
 			bullet := g.player.Bullets[i]
-			if bullet.OwnerID == g.player.ID && distance(bullet.X, bullet.Y, otherPlayer.X, otherPlayer.Y) < PlayerRadius+BulletRadius {
+			// if bullet.OwnerID == g.player.ID && distance(bullet.X, bullet.Y, otherPlayer.X, otherPlayer.Y) < PlayerRadius+BulletRadius {
+			if lineIntersectsCircle(bullet.X, bullet.Y, 1000* math.Cos(bullet.Direction), 1000 * math.Sin(bullet.Direction), otherPlayer.X, otherPlayer.Y, 10) {
 				otherPlayer.Health -= 20
 				if otherPlayer.Health < 0 {
 					otherPlayer.Health = 0
 				}
-				g.sendEvent(EventTypePlayerHit, PlayerHit{VictimID: otherPlayer.ID, Damage: 20})
+				g.sendEvent(player.EventTypePlayerHit, PlayerHit{VictimID: otherPlayer.ID, Damage: 20})
 				g.player.Bullets = append(g.player.Bullets[:i], g.player.Bullets[i+1:]...)
 			}
 		}
 	}
 }
 
+func lineIntersectsCircle(x1, y1, x2, y2, cx, cy, radius float64) bool {
+	// Vector from start to end of the line
+	// y1 = -y1
+	// y2 = -y2
+	dx := x2 - x1
+	dy := y2 - y1
+
+	// Vector from start of the line to the circle center
+	fx := x1 - cx
+	fy := y1 - cy
+
+	a := dx*dx + dy*dy
+	b := 2 * (fx*dx + fy*dy)
+	c := (fx*fx + fy*fy) - radius*radius
+
+		// ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%s: %d HP", player.ID, player.Health), int(player.X-20), int(player.Y-30))
+
+	discriminant := b*b - 4*a*c
+	if discriminant < 0 {
+		// No intersection
+		return false
+	}
+
+	discriminant = math.Sqrt(discriminant)
+
+	// Find the two points of intersection, t0 and t1
+	t0 := (-b - discriminant) / (2 * a)
+	t1 := (-b + discriminant) / (2 * a)
+
+	// Check if either of the intersection points is within the line segment
+	return (t0 >= 0 && t0 <= 1) || (t1 >= 0 && t1 <= 1)
+}
+
 func distance(x1, y1, x2, y2 float64) float64 {
 	return math.Hypot(x2-x1, y2-y1)
 }
 
-func (g *Game) Draw(screen *ebiten.Image) {
-	for _, obstacle := range g.obstacles {
-		ebitenutil.DrawRect(screen, obstacle.X, obstacle.Y, obstacle.Width, obstacle.Height, color.RGBA{80, 80, 80, 255})
-	}
+var (
+	shadowImage   = ebiten.NewImage(ScreenWidth, ScreenHeight)
+	triangleImage = ebiten.NewImage(ScreenWidth, ScreenHeight)
+	bgImage       *ebiten.Image
+)
 
-	ebitenutil.DrawCircle(screen, g.player.X, g.player.Y, PlayerRadius, color.RGBA{0, 255, 0, 255})
-	ebitenutil.DebugPrint(screen, fmt.Sprintf("Health: %d", g.player.Health))
+func rayVertices(x1, y1, x2, y2, x3, y3 float64) []ebiten.Vertex {
+	return []ebiten.Vertex{
+		{DstX: float32(x1), DstY: float32(y1), SrcX: 0, SrcY: 0, ColorR: 1, ColorG: 1, ColorB: 1, ColorA: 1},
+		{DstX: float32(x2), DstY: float32(y2), SrcX: 0, SrcY: 0, ColorR: 1, ColorG: 1, ColorB: 1, ColorA: 1},
+		{DstX: float32(x3), DstY: float32(y3), SrcX: 0, SrcY: 0, ColorR: 1, ColorG: 1, ColorB: 1, ColorA: 1},
+	}
+}
+
+func (g *Game) Draw(screen *ebiten.Image) {
+	// for _, obstacle := range g.obstacles {
+	// 	ebitenutil.DrawRect(screen, obstacle.X, obstacle.Y, obstacle.Width, obstacle.Height, color.RGBA{80, 80, 80, 255})
+	// }
+
+	// laser
+	// laserLength := float64(ScreenWidth)
+	// laserEndX := g.player.X + math.Cos(g.player.Angle)*laserLength
+	// laserEndY := g.player.Y + math.Sin(g.player.Angle)*laserLength
+	// ebitenutil.DrawLine(screen, g.player.X, g.player.Y, laserEndX, laserEndY, color.RGBA{255, 0, 0, 255})
+	// vector.StrokeLine(screen, float32(g.player.X), float32(g.player.Y), float32(laserEndX), float32(laserEndY), 1.0, color.RGBA{255, 0, 0, 255}, true)
+	shadowImage.Fill(color.Black)
+
+	rays := g.castRays(g.player.X, g.player.Y, g.objects)
+
+	opts := &ebiten.DrawTrianglesOptions{}
+	opts.Address = ebiten.AddressRepeat
+	opts.Blend = ebiten.BlendDestinationOut
+
+	screen.DrawImage(bgImage, nil)
 
 	for _, bullet := range g.player.Bullets {
-		ebitenutil.DrawCircle(screen, bullet.X, bullet.Y, BulletRadius, color.RGBA{0, 255, 255, 255})
+		vector.DrawFilledCircle(screen, float32(bullet.X), float32(bullet.Y), BulletRadius, color.RGBA{0, 255, 255, 255}, false)
+		bullet.Draw(screen)
 	}
 
-	for _, player := range g.players {
+	for _, p := range g.players {
 		clr := color.RGBA{255, 0, 0, 255}
-		if player.Health <= 0 {
+		if p.Health <= 0 {
 			clr = color.RGBA{100, 100, 100, 255}
 		}
-		ebitenutil.DrawCircle(screen, player.X, player.Y, PlayerRadius, clr)
-		ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%s: %d HP", player.ID, player.Health), int(player.X-20), int(player.Y-30))
+		// ebitenutil.DrawCircle(screen, player.X, player.Y, PlayerRadius, clr)
+		p.Draw(screen)
+		vector.DrawFilledCircle(screen, float32(p.X), float32(p.Y), PlayerRadius, clr, false)
+		// ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%s: %d HP", player.ID, player.Health), int(player.X-20), int(player.Y-30))
 
-		for _, bullet := range player.Bullets {
-			ebitenutil.DrawCircle(screen, bullet.X, bullet.Y, BulletRadius, color.RGBA{255, 255, 0, 255})
+		for _, bullet := range p.Bullets {
+			bullet.Draw(screen)
+			// vector.DrawFilledCircle(screen, float32(bullet.X), float32(bullet.Y), BulletRadius, color.RGBA{255, 255, 0, 255}, true)
 		}
 	}
+
+	for i, ray := range rays {
+		nextLine := rays[(i+1)%len(rays)]
+
+		v := rayVertices(g.player.X, g.player.Y, nextLine.X2, nextLine.Y2, ray.X2, ray.Y2)
+		shadowImage.DrawTriangles(v, []uint16{0, 1, 2}, triangleImage, opts)
+	}
+
+	// for _, ray := range rays {
+	// 	vector.StrokeLine(screen, float32(ray.X1), float32(ray.Y1), float32(ray.X2), float32(ray.Y2), 1, color.RGBA{255, 255, 0, 100}, true)
+	// }
+
+	op := &ebiten.DrawImageOptions{}
+	// op.ColorScale.ScaleAlpha(0.9)
+	// op.ColorScale.ScaleAlpha(0.7)
+	screen.DrawImage(shadowImage, op)
+
+	// Draw obstacles
+	for _, obs := range g.objects {
+		for _, w := range obs.walls {
+			vector.StrokeLine(screen, float32(w.X1), float32(w.Y1), float32(w.X2), float32(w.Y2), 1, color.RGBA{255, 0, 0, 255}, true)
+		}
+	}
+
+	// Draw player
+	g.player.Draw(screen)
+	for _, b := range g.player.Bullets {
+		b.Draw(screen)
+	}
+
+	// vector.DrawFilledCircle(screen, float32(g.player.X), float32(g.player.Y), PlayerRadius, color.RGBA{0, 255, 0, 255}, true)
+	// ebitenutil.DebugPrintAt(screen, "WASD: move", 160, 0)
+	// ebitenutil.DebugPrintAt(screen, fmt.Sprintf("TPS: %0.2f", ebiten.ActualTPS()), 51, 51)
+	// ebitenutil.DebugPrintAt(screen, fmt.Sprintf("FPS: %0.2f", ebiten.ActualFPS()), 51, 61)
+	// ebitenutil.DebugPrintAt(screen, fmt.Sprintf("Rays: 2*%d", len(rays)/2), 200, 222)
+	//
+	// // TODO: separate player package for logic and ui
+	// bounds := g.player.SpriteBounds()
+	// opPlayer := &ebiten.DrawImageOptions{}
+	//
+	// hw := float64(bounds.Dx() / 2)
+	// hh := float64(bounds.Dy() / 2)
+	//
+	// opPlayer.GeoM.Translate(-hw, -hh)
+	// opPlayer.GeoM.Scale(0.25, 0.25)
+	// opPlayer.GeoM.Rotate(g.player.Angle)
+	// // op.GeoM.Translate(hw, hh)
+	// opPlayer.GeoM.Translate(g.player.X, g.player.Y)
+	//
+	// screen.DrawImage(g.player.sprite, opPlayer)
+	// vector.DrawFilledCircle(screen, float32(g.player.X), float32(g.player.Y), PlayerRadius, color.RGBA{0, 255, 0, 255}, false)
+	// ebitenutil.DebugPrint(screen, fmt.Sprintf("Health: %d", g.player.Health))
 }
 
 func (g *Game) Layout(_, _ int) (int, int) {
@@ -281,11 +391,11 @@ func (g *Game) sendPlayerUpdate() {
 		Health:  g.player.Health,
 		Bullets: g.player.Bullets,
 	}
-	g.sendEvent(EventTypePlayerUpdate, update)
+	g.sendEvent(player.EventTypePlayerUpdate, update)
 }
 
-func (g *Game) sendEvent(eventType EventType, data interface{}) {
-	event := Event{Type: eventType}
+func (g *Game) sendEvent(eventType player.EventType, data interface{}) {
+	event := player.Event{Type: eventType}
 	eventData, err := json.Marshal(data)
 	if err != nil {
 		log.Println("Error marshaling event data:", err)
@@ -313,14 +423,14 @@ func (g *Game) listenForUpdates() {
 			return
 		}
 
-		var event Event
+		var event player.Event
 		if err := json.Unmarshal([]byte(msg), &event); err != nil {
 			log.Println("Error unmarshaling event:", err)
 			continue
 		}
 
 		switch event.Type {
-		case EventTypePlayerUpdate:
+		case player.EventTypePlayerUpdate:
 			var update PlayerUpdate
 			if err := json.Unmarshal(event.Data, &update); err != nil {
 				log.Println("Error unmarshaling PlayerUpdate:", err)
@@ -332,19 +442,19 @@ func (g *Game) listenForUpdates() {
 			}
 
 			g.mu.Lock()
-			player, exists := g.players[update.ID]
+			p, exists := g.players[update.ID]
 			if !exists {
-				player = NewPlayer(update.ID, update.X, update.Y)
-				g.players[update.ID] = player
+				p = player.NewPlayer(update.ID, update.X, update.Y)
+				g.players[update.ID] = p
 			}
-			player.X = update.X
-			player.Y = update.Y
-			player.Angle = update.Angle
-			player.Health = update.Health
-			player.Bullets = update.Bullets
+			p.X = update.X
+			p.Y = update.Y
+			p.Angle = update.Angle
+			p.Health = update.Health
+			p.Bullets = update.Bullets
 			g.mu.Unlock()
 
-		case EventTypePlayerHit:
+		case player.EventTypePlayerHit:
 			var hit PlayerHit
 			if err := json.Unmarshal(event.Data, &hit); err != nil {
 				log.Println("Error unmarshaling PlayerHit:", err)
@@ -414,6 +524,8 @@ func startServer() {
 	}
 }
 
+const padding = 20
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "server" {
 		startServer()
@@ -434,12 +546,24 @@ func main() {
 	}
 	defer conn.Close()
 
+	bgImage, _, _ = ebitenutil.NewImageFromFile("./aa.png")
+
+	triangleImage.Fill(color.White)
+
 	game := &Game{
-		player:    NewPlayer(playerID, ScreenWidth/2, ScreenHeight/2),
-		players:   make(map[string]*Player),
-		obstacles: NewObstacles(),
-		conn:      conn,
+		player:  player.NewPlayer(playerID, ScreenWidth/2, ScreenHeight/2),
+		players: make(map[string]*player.Player),
+		// obstacles: NewObstacles(),
+		conn: conn,
 	}
+
+	game.objects = append(game.objects, object{rect(padding, padding, ScreenWidth-2*padding, ScreenHeight-2*padding)})
+
+	game.objects = append(game.objects, object{rect(700, 400, 200, 300)})
+
+	// for i := 0; i < 50; i++ {
+	// 	game.objects = append(game.objects, object{rect(200+float64(50*i), 50+float64(25*i), 30, 20)})
+	// }
 
 	go game.listenForUpdates()
 
