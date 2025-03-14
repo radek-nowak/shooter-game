@@ -12,6 +12,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
+	"shooter/game"
 	"shooter/utils"
 )
 
@@ -54,14 +55,28 @@ func (player Player) SpriteBounds() image.Rectangle {
 	return player.sprite.Bounds()
 }
 
+func (p *Player) HitBox() game.Object {
+	// TODO: this is crap, create new object with centered x,y and use wh
+	dx := float64(p.SpriteBounds().Dx()) * 0.25
+	dy := float64(p.SpriteBounds().Dy()) * 0.25
+	return game.Object{Walls: game.Rect(
+		p.X-dx/2,
+		p.Y-dy/2,
+		dx,
+		dy,
+	)}
+}
+
 func NewPlayer(id string, x, y float64) *Player {
 	return &Player{
-		ID:      id,
-		X:       x,
-		Y:       y,
-		Health:  MaxHealth,
-		Bullets: []*Bullet{},
-		sprite:  PlayerSprite,
+		ID:       id,
+		X:        x,
+		Y:        y,
+		Angle:    0,
+		Health:   MaxHealth,
+		Bullets:  []*Bullet{},
+		lastShot: time.Time{},
+		sprite:   PlayerSprite,
 	}
 }
 
@@ -128,10 +143,14 @@ func (p *Player) Update() {
 		// if p.Bullets[i].OutOfBounds() || bulletHitsObstacle(p.Bullets[i], obstacles) {
 		// p.Bullets = append(p.Bullets[:i], p.Bullets[i+1:]...)
 		// }
+		p.Bullets[i].Update()
 		if p.Bullets[i].OutOfBounds(1600, 900) {
 			p.Bullets = append(p.Bullets[:i], p.Bullets[i+1:]...)
 		}
-		p.Bullets[i].Update()
+
+		if p.Bullets[i].Frames > 15 {
+			p.Bullets = append(p.Bullets[:i], p.Bullets[i+1:]...)
+		}
 	}
 }
 
@@ -156,6 +175,10 @@ func (p *Player) Draw(screen *ebiten.Image) {
 
 	screen.DrawImage(p.sprite, opPlayer)
 	vector.DrawFilledCircle(screen, float32(p.X), float32(p.Y), PlayerRadius, color.RGBA{0, 255, 0, 255}, false)
+	vector.StrokeLine(screen, float32(p.HitBox().Walls[0].X1), float32(p.HitBox().Walls[0].Y1), float32(p.HitBox().Walls[0].X2), float32(p.HitBox().Walls[0].Y2), 1.0, color.White, false)
+	vector.StrokeLine(screen, float32(p.HitBox().Walls[1].X1), float32(p.HitBox().Walls[1].Y1), float32(p.HitBox().Walls[1].X2), float32(p.HitBox().Walls[1].Y2), 1.0, color.White, false)
+	vector.StrokeLine(screen, float32(p.HitBox().Walls[2].X1), float32(p.HitBox().Walls[2].Y1), float32(p.HitBox().Walls[2].X2), float32(p.HitBox().Walls[2].Y2), 1.0, color.White, false)
+	vector.StrokeLine(screen, float32(p.HitBox().Walls[3].X1), float32(p.HitBox().Walls[3].Y1), float32(p.HitBox().Walls[3].X2), float32(p.HitBox().Walls[3].Y2), 1.0, color.White, false)
 	ebitenutil.DebugPrint(screen, fmt.Sprintf("Health: %d", p.Health))
 }
 
@@ -170,20 +193,11 @@ func (p *Player) Shoot() {
 	p.Bullets = append(p.Bullets, bullet)
 }
 
-func (b *Bullet) Draw(screen *ebiten.Image) {
-	// Calculate the end point of the bullet's line for visualization
-	lineLength := 1000.0 // You can adjust this length as needed
-	endX := b.X + math.Cos(b.Direction)*lineLength
-	endY := b.Y + math.Sin(b.Direction)*lineLength
-
-	// Draw the line representing the bullet's trajectory
-	if b.Frames < 15 {
-		vector.StrokeLine(screen, float32(b.X), float32(b.Y), float32(endX), float32(endY), 2.0, color.White, false)
-	}
-}
-
 func (b *Bullet) Update() {
 	b.Frames++
+
+	if b.Frames >= 15 {
+	}
 	// Calculate the new position
 	// Calculate the end position of the bullet's trajectory
 	// endX := b.X+ math.Cos(b.Direction)*b.Speed
@@ -266,6 +280,27 @@ func lineIntersectsCircle(x1, y1, x2, y2, cx, cy, radius float64) bool {
 
 func (b *Bullet) OutOfBounds(width, height float64) bool {
 	return b.X < 0 || b.X > width || b.Y < 0 || b.Y > height
+}
+
+func (b *Bullet) Line() game.Line {
+	return game.Line{
+		X1: b.X,
+		Y1: b.Y,
+		X2: b.X + math.Cos(b.Direction)*1000,
+		Y2: b.Y + math.Sin(b.Direction)*1000,
+	}
+}
+
+func (b *Bullet) Draw(screen *ebiten.Image) {
+	// Calculate the end point of the bullet's line for visualization
+	lineLength := 1000.0 // You can adjust this length as needed
+	endX := b.X + math.Cos(b.Direction)*lineLength
+	endY := b.Y + math.Sin(b.Direction)*lineLength
+
+	// Draw the line representing the bullet's trajectory
+	if b.Frames < 15 {
+		vector.StrokeLine(screen, float32(b.X), float32(b.Y), float32(endX), float32(endY), 2.0, color.White, false)
+	}
 }
 
 // func bulletHitsObstacle(b *Bullet, obstacles []*Obstacle) bool {
