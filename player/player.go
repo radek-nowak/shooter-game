@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"math/rand"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -20,7 +21,7 @@ const (
 	MaxHealth               = 100
 	PlayerSpeed             = 1.0
 	PlayerSprintSpeedFactor = 1.7
-	BulletSpeed             = 100.0
+	BulletSpeed             = 80.0
 	PlayerRadius            = 10.0
 	BulletRadius            = 3.0
 	ShootCooldown           = 200 * time.Millisecond
@@ -84,17 +85,81 @@ type Bullet struct {
 	OwnerID   string  `json:"owner_id"`
 	X         float64 `json:"x"`
 	Y         float64 `json:"y"`
+	EndX      float64 `json:"end_x"`
+	EndY      float64 `json:"end_y"`
 	Direction float64 `json:"direction"`
-	Frames    int     `json:"frames"`
+	Velocity  float64 `json:"velocity"`
 }
 
-func (p *Player) Update() {
+func (p *Player) UpdateOnObstacle() {
+	moveX, moveY := 0.0, 0.0
+
+	// Move horizontally and check collision
+	p.X += moveX
+	// if collidesWithObstacles(p.X, p.Y, PlayerRadius, obstacles) {
+	// p.X -= moveX // Revert horizontal movement if collides
+	// }
+	//
+	// // Move vertically and check collision
+	p.Y += moveY
+	// if collidesWithObstacles(p.X, p.Y, PlayerRadius, obstacles) {
+	// p.Y -= moveY // Revert vertical movement if collides
+	// }
+}
+
+// func (p *Player) Update() {
+// 	if p.Health <= 0 {
+// 		return
+// 	}
+//
+// 	moveX, moveY := 0.0, 0.0
+// 	movementSpeed := PlayerSpeed
+//
+// 	if ebiten.IsKeyPressed(ebiten.KeyShiftLeft) {
+// 		movementSpeed *= PlayerSprintSpeedFactor
+// 	}
+//
+// 	if ebiten.IsKeyPressed(ebiten.KeyW) {
+// 		moveY -= movementSpeed
+// 	}
+// 	if ebiten.IsKeyPressed(ebiten.KeyS) {
+// 		moveY += movementSpeed
+// 	}
+// 	if ebiten.IsKeyPressed(ebiten.KeyA) {
+// 		moveX -= movementSpeed
+// 	}
+// 	if ebiten.IsKeyPressed(ebiten.KeyD) {
+// 		moveX += movementSpeed
+// 	}
+//
+// 	p.X += moveX
+// 	p.Y += moveY
+// 	// Update aiming angle
+// 	mx, my := ebiten.CursorPosition()
+// 	dx, dy := float64(mx)-p.X, float64(my)-p.Y
+// 	p.Angle = math.Atan2(dy, dx)
+//
+// 	// Shooting
+// 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) && time.Since(p.lastShot) > ShootCooldown {
+// 		p.Shoot()
+// 		p.lastShot = time.Now()
+// 	}
+//
+// 	// Update bullets
+// 	for i := len(p.Bullets) - 1; i >= 0; i-- {
+// 		p.Bullets[i].Update()
+// 		if p.Bullets[i].OutOfBounds(1600, 900) {
+// 			p.Bullets = append(p.Bullets[:i], p.Bullets[i+1:]...)
+// 		}
+// 	}
+// }
+
+func (p *Player) Update(hitsObstacle bool) {
 	if p.Health <= 0 {
 		return
 	}
 
 	moveX, moveY := 0.0, 0.0
-
 	movementSpeed := PlayerSpeed
 
 	if ebiten.IsKeyPressed(ebiten.KeyShiftLeft) {
@@ -114,17 +179,16 @@ func (p *Player) Update() {
 		moveX += movementSpeed
 	}
 
-	// Move horizontally and check collision
 	p.X += moveX
-	// if collidesWithObstacles(p.X, p.Y, PlayerRadius, obstacles) {
-	// p.X -= moveX // Revert horizontal movement if collides
-	// }
-	//
+	if hitsObstacle {
+		p.X -= moveX // Revert horizontal movement if collides
+	}
+
 	// // Move vertically and check collision
 	p.Y += moveY
-	// if collidesWithObstacles(p.X, p.Y, PlayerRadius, obstacles) {
-	// p.Y -= moveY // Revert vertical movement if collides
-	// }
+	if hitsObstacle {
+		p.Y -= moveY // Revert vertical movement if collides
+	}
 
 	// Update aiming angle
 	mx, my := ebiten.CursorPosition()
@@ -139,16 +203,8 @@ func (p *Player) Update() {
 
 	// Update bullets
 	for i := len(p.Bullets) - 1; i >= 0; i-- {
-		// p.Bullets[i].Update()
-		// if p.Bullets[i].OutOfBounds() || bulletHitsObstacle(p.Bullets[i], obstacles) {
-		// p.Bullets = append(p.Bullets[:i], p.Bullets[i+1:]...)
-		// }
 		p.Bullets[i].Update()
 		if p.Bullets[i].OutOfBounds(1600, 900) {
-			p.Bullets = append(p.Bullets[:i], p.Bullets[i+1:]...)
-		}
-
-		if p.Bullets[i].Frames > 15 {
 			p.Bullets = append(p.Bullets[:i], p.Bullets[i+1:]...)
 		}
 	}
@@ -183,99 +239,26 @@ func (p *Player) Draw(screen *ebiten.Image) {
 }
 
 func (p *Player) Shoot() {
+	angleRecoil := (rand.Float64() - 0.5) / 10
 	bullet := &Bullet{
 		OwnerID:   p.ID,
-		X:         p.X, // + math.Cos(p.Angle)*PlayerRadius,
-		Y:         p.Y, // + math.Sin(p.Angle)*PlayerRadius,
-		Direction: p.Angle,
-		Frames:    10,
+		X:         p.X,
+		Y:         p.Y,
+		EndX:      p.X + math.Cos(p.Angle+angleRecoil)*BulletSpeed,
+		EndY:      p.Y + math.Sin(p.Angle+angleRecoil)*BulletSpeed,
+		Direction: p.Angle + angleRecoil,
+		Velocity:  BulletSpeed,
 	}
 	p.Bullets = append(p.Bullets, bullet)
 }
 
 func (b *Bullet) Update() {
-	b.Frames++
-
-	if b.Frames >= 15 {
-	}
-	// Calculate the new position
-	// Calculate the end position of the bullet's trajectory
-	// endX := b.X+ math.Cos(b.Direction)*b.Speed
-	// endY := b.X+ math.Sin(b.Direction)*b.Speed
-
-	// Check for collisions along the trajectory
-	// for _, player := range players {
-	// 	if player.ID == b.OwnerID || player.Health <= 0 {
-	// 		continue
-	// 	}
-	//
-	// 	if lineIntersectsCircle(b.X, b.Y, endX, endY, player.X, player.Y, PlayerRadius) {
-	// 		player.Health -= 20
-	// 		if player.Health < 0 {
-	// 			player.Health = 0
-	// 		}
-	// 		// Mark bullet for removal or handle it accordingly
-	// 		b.Speed = 0
-	// 		return
-	// 	}
-	// }
-	//
-	// // Update the bullet's start position for the next frame
-	// b.X = endX
-	// b.Y = endY
-
-	// newX := b.X + b.DX
-	// newY := b.Y + b.DY
-	//
-	// // Check for collisions along the path
-	// for _, player := range players {
-	// 	if player.ID == b.OwnerID || player.Health <= 0 {
-	// 		continue
-	// 	}
-	//
-	// 	if lineIntersectsCircle(b.X, b.Y, newX, newY, player.X, player.Y, PlayerRadius) {
-	// 		player.Health -= 20
-	// 		if player.Health < 0 {
-	// 			player.Health = 0
-	// 		}
-	// 		// Mark bullet for removal or handle it accordingly
-	// 		b.DX, b.DY = 0, 0
-	// 		return
-	// 	}
-	// }
-	//
-	// // Update the bullet's position
-	// b.X = newX
-	// b.Y = newY
-}
-
-func lineIntersectsCircle(x1, y1, x2, y2, cx, cy, radius float64) bool {
-	// Vector from start to end of the line
-	dx := x2 - x1
-	dy := y2 - y1
-
-	// Vector from start of the line to the circle center
-	fx := x1 - cx
-	fy := y1 - cy
-
-	a := dx*dx + dy*dy
-	b := 2 * (fx*dx + fy*dy)
-	c := (fx*fx + fy*fy) - radius*radius
-
-	discriminant := b*b - 4*a*c
-	if discriminant < 0 {
-		// No intersection
-		return false
-	}
-
-	discriminant = math.Sqrt(discriminant)
-
-	// Find the two points of intersection, t0 and t1
-	t0 := (-b - discriminant) / (2 * a)
-	t1 := (-b + discriminant) / (2 * a)
-
-	// Check if either of the intersection points is within the line segment
-	return (t0 >= 0 && t0 <= 1) || (t1 >= 0 && t1 <= 1)
+	dx := math.Cos(b.Direction) * b.Velocity
+	dy := math.Sin(b.Direction) * b.Velocity
+	b.X += dx
+	b.Y += dy
+	b.EndX += dx
+	b.EndY += dy
 }
 
 func (b *Bullet) OutOfBounds(width, height float64) bool {
@@ -286,28 +269,15 @@ func (b *Bullet) Line() game.Line {
 	return game.Line{
 		X1: b.X,
 		Y1: b.Y,
-		X2: b.X + math.Cos(b.Direction)*1000,
-		Y2: b.Y + math.Sin(b.Direction)*1000,
+		X2: b.EndX,
+		Y2: b.EndY,
 	}
 }
 
 func (b *Bullet) Draw(screen *ebiten.Image) {
-	// Calculate the end point of the bullet's line for visualization
-	lineLength := 1000.0 // You can adjust this length as needed
-	endX := b.X + math.Cos(b.Direction)*lineLength
-	endY := b.Y + math.Sin(b.Direction)*lineLength
+	// vector.DrawFilledCircle(screen, float32(b.X), float32(b.Y), 1, color.White, false)
+	// TODO: bulled line dissapears before hitbox
 
-	// Draw the line representing the bullet's trajectory
-	if b.Frames < 15 {
-		vector.StrokeLine(screen, float32(b.X), float32(b.Y), float32(endX), float32(endY), 2.0, color.White, false)
-	}
+	// vector.StrokeLine(screen, float32(b.X), float32(b.Y), float32(b.EndX+25*math.Cos(b.Direction)), float32(b.EndY+25*math.Sin(b.Direction)), 1.7, color.White, false)
+	vector.StrokeLine(screen, float32(b.X), float32(b.Y), float32(b.EndX), float32(b.EndY), 1.7, color.White, false)
 }
-
-// func bulletHitsObstacle(b *Bullet, obstacles []*Obstacle) bool {
-// 	for _, obstacle := range obstacles {
-// 		if b.X >= obstacle.X && b.X <= obstacle.X+obstacle.Width && b.Y >= obstacle.Y && b.Y <= obstacle.Y+obstacle.Height {
-// 			return true
-// 		}
-// 	}
-// 	return false
-// }
