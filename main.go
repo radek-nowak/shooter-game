@@ -29,7 +29,7 @@ const (
 	BulletRadius = 3.0
 
 	// raycasting
-	RayCount       = 120    // Number of rays casted for visibility
+	RayCount       = 100    // Number of rays casted for visibility
 	RayLength      = 1600.0 // Maximum ray length
 	ObstacleBorder = 2.0
 )
@@ -146,29 +146,55 @@ func (g *Game) Update() error {
 	return nil
 }
 
+func RemoveIndex[E any](s []E, index int) []E {
+	ret := make([]E, 0)
+	ret = append(ret, s[:index]...)
+	return append(ret, s[index+1:]...)
+}
+
 func (g *Game) checkBulletCollisions() {
-	for _, otherPlayer := range g.players {
-		if otherPlayer.Health <= 0 || otherPlayer.ID == g.player.ID {
-			continue
+	// Check bullet collisions with objects first
+	for i := len(g.player.Bullets) - 1; i >= 0; i-- {
+		bullet := g.player.Bullets[i]
+
+		for _, o := range g.Objects {
+			for _, l := range o.Walls {
+				if _, _, intersects := game.Intersection(l, bullet.Line()); intersects {
+					// Remove bullet on object collision
+					if i >= len(g.player.Bullets) {
+						log.Println("Bullet index out of bounds")
+						break
+					}
+					g.player.Bullets = append(g.player.Bullets[:i], g.player.Bullets[i+1:]...)
+					break
+				}
+			}
 		}
-		for i := len(g.player.Bullets) - 1; i >= 0; i-- {
-			bullet := g.player.Bullets[i]
+
+		// Check bullet collisions with players
+		for _, otherPlayer := range g.players {
+			if otherPlayer.Health <= 0 || otherPlayer.ID == g.player.ID {
+				continue
+			}
 			hitBoxLines := otherPlayer.HitBox().Walls
 
 			sort.Slice(hitBoxLines, func(i, j int) bool {
-				// return math.Hypot(hitBoxLines[i].X2, hitBoxLines[i].Y2)-math.Hypot(hitBoxLines[j].X2, hitBoxLines[j].Y2) > math.Hypot(bullet.X, bullet.Y)
 				return distance((hitBoxLines[i].X2+hitBoxLines[i].X1)/2, (hitBoxLines[i].Y2+hitBoxLines[i].Y1)/2, bullet.X, bullet.Y) < distance((hitBoxLines[j].X2+hitBoxLines[j].X1)/2, (hitBoxLines[j].Y2+hitBoxLines[j].Y1)/2, bullet.X, bullet.Y)
 			})
 
-			for _, l := range otherPlayer.HitBox().Walls {
+			for _, l := range hitBoxLines {
 				if _, _, intersects := game.Intersection(l, bullet.Line()); intersects {
 
-					otherPlayer.Health -= 50 //TODO: weapon defines damage
+					otherPlayer.Health -= 50 // TODO: weapon defines damage
 					if otherPlayer.Health < 0 {
 						otherPlayer.Health = 0
 					}
-					g.sendEvent(player.EventTypePlayerHit, PlayerHit{VictimID: otherPlayer.ID, Damage: 20})
+					if i >= len(g.player.Bullets) {
+						log.Println("Bullet index out of bounds")
+						break
+					}
 					g.player.Bullets = append(g.player.Bullets[:i], g.player.Bullets[i+1:]...)
+					g.sendEvent(player.EventTypePlayerHit, PlayerHit{VictimID: otherPlayer.ID, Damage: 20})
 					break
 				}
 			}
@@ -228,11 +254,11 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	}
 
 	// laser
-	laserLength := float64(ScreenWidth)
-	laserEndX := g.player.X + math.Cos(g.player.Angle)*laserLength
-	laserEndY := g.player.Y + math.Sin(g.player.Angle)*laserLength
-	ebitenutil.DrawLine(screen, g.player.X, g.player.Y, laserEndX, laserEndY, color.RGBA{255, 0, 0, 255})
-	vector.StrokeLine(screen, float32(g.player.X), float32(g.player.Y), float32(laserEndX), float32(laserEndY), 1.0, color.RGBA{255, 0, 0, 255}, true)
+	// laserLength := float64(ScreenWidth)
+	// laserEndX := g.player.X + math.Cos(g.player.Angle)*laserLength
+	// laserEndY := g.player.Y + math.Sin(g.player.Angle)*laserLength
+	// ebitenutil.DrawLine(screen, g.player.X, g.player.Y, laserEndX, laserEndY, color.RGBA{255, 0, 0, 255})
+	// vector.StrokeLine(screen, float32(g.player.X), float32(g.player.Y), float32(laserEndX), float32(laserEndY), 1.0, color.RGBA{255, 0, 0, 255}, true)
 
 	for i, ray := range rays {
 		nextLine := rays[(i+1)%len(rays)]
@@ -240,7 +266,6 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		v := rayVertices(g.player.X, g.player.Y, nextLine.X2, nextLine.Y2, ray.X2, ray.Y2)
 		shadowImage.DrawTriangles(v, []uint16{0, 1, 2}, triangleImage, opts)
 	}
-
 
 	// NOTE: dispplay ray casting
 	// for _, ray := range rays {
@@ -441,10 +466,10 @@ func main() {
 		"111": player.NewPlayer("111", 900, 700),
 		"112": player.NewPlayer("112", 900, 750),
 		"222": player.NewPlayer("222", 600, 300),
-		"223": player.NewPlayer("223", 690, 300),
-		"224": player.NewPlayer("224", 730, 300),
+		// "223": player.NewPlayer("223", 690, 300),
+		"224": player.NewPlayer("224", 790, 300),
 		"333": player.NewPlayer("333", 100, 100),
-		"444": player.NewPlayer("444", 1300, 300),
+		// "444": player.NewPlayer("444", 1300, 300),
 	}
 
 	g := &Game{

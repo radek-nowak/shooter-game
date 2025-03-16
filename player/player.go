@@ -6,7 +6,7 @@ import (
 	"image"
 	"image/color"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -20,11 +20,11 @@ import (
 const (
 	MaxHealth               = 100
 	PlayerSpeed             = 1.0
-	PlayerSprintSpeedFactor = 1.7
-	BulletSpeed             = 80.0
+	PlayerSprintSpeedFactor = 2.0
+	BulletSpeed             = 120.0
 	PlayerRadius            = 10.0
 	BulletRadius            = 3.0
-	ShootCooldown           = 200 * time.Millisecond
+	ShootCooldown           = 50 * time.Millisecond
 )
 
 var PlayerSprite = utils.MustLoadImage("assets/survivor-idle_rifle_0.png")
@@ -42,14 +42,16 @@ type Event struct {
 }
 
 type Player struct {
-	ID       string    `json:"id"`
-	X        float64   `json:"x"`
-	Y        float64   `json:"y"`
-	Angle    float64   `json:"angle"`
-	Health   int       `json:"health"`
-	Bullets  []*Bullet `json:"bullets"`
-	lastShot time.Time `json:"-"`
-	sprite   *ebiten.Image
+	ID         string    `json:"id"`
+	X          float64   `json:"x"`
+	Y          float64   `json:"y"`
+	Angle      float64   `json:"angle"`
+	Health     int       `json:"health"`
+	Bullets    []*Bullet `json:"bullets"`
+	lastShot   time.Time `json:"-"`
+	sprite     *ebiten.Image
+	playerShot bool
+	capacity   int16
 }
 
 func (player Player) SpriteBounds() image.Rectangle {
@@ -70,14 +72,16 @@ func (p *Player) HitBox() game.Object {
 
 func NewPlayer(id string, x, y float64) *Player {
 	return &Player{
-		ID:       id,
-		X:        x,
-		Y:        y,
-		Angle:    0,
-		Health:   MaxHealth,
-		Bullets:  []*Bullet{},
-		lastShot: time.Time{},
-		sprite:   PlayerSprite,
+		ID:         id,
+		X:          x,
+		Y:          y,
+		Angle:      0,
+		Health:     MaxHealth,
+		Bullets:    []*Bullet{},
+		lastShot:   time.Time{},
+		sprite:     PlayerSprite,
+		playerShot: false,
+		capacity:   30,
 	}
 }
 
@@ -155,6 +159,7 @@ func (p *Player) UpdateOnObstacle() {
 // }
 
 func (p *Player) Update(hitsObstacle bool) {
+	p.playerShot = false
 	if p.Health <= 0 {
 		return
 	}
@@ -236,16 +241,40 @@ func (p *Player) Draw(screen *ebiten.Image) {
 	vector.StrokeLine(screen, float32(p.HitBox().Walls[2].X1), float32(p.HitBox().Walls[2].Y1), float32(p.HitBox().Walls[2].X2), float32(p.HitBox().Walls[2].Y2), 1.0, color.White, false)
 	vector.StrokeLine(screen, float32(p.HitBox().Walls[3].X1), float32(p.HitBox().Walls[3].Y1), float32(p.HitBox().Walls[3].X2), float32(p.HitBox().Walls[3].Y2), 1.0, color.White, false)
 	ebitenutil.DebugPrint(screen, fmt.Sprintf("Health: %d", p.Health))
+	ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%d", p.capacity), 0, 20)
+
+	muzzleOffsetX := 136.0 / 4 // Adjust this value to match the actual muzzle position in the sprite
+	muzzleOffsetY := 49.0 / 4  // Adjust this value to match the actual muzzle position in the sprite
+
+	// Calculate the muzzle position
+	muzzleX := p.X + math.Cos(p.Angle)*muzzleOffsetX - math.Sin(p.Angle)*muzzleOffsetY
+	muzzleY := p.Y + math.Sin(p.Angle)*muzzleOffsetX + math.Cos(p.Angle)*muzzleOffsetY
+
+	if p.playerShot {
+		DrawMuzzleFlash(screen, muzzleX, muzzleY)
+	}
 }
 
 func (p *Player) Shoot() {
-	angleRecoil := (rand.Float64() - 0.5) / 10
+	p.playerShot = true
+	p.capacity--
+	angleRecoil := (rand.Float64() - 0.5) / 15
+
+	// based on player's sprite
+	muzzleOffsetX := 136.0 / 4
+	muzzleOffsetY := 49.0 / 4
+
+	// Calculate the muzzle position
+	muzzleX := p.X + math.Cos(p.Angle)*muzzleOffsetX - math.Sin(p.Angle)*muzzleOffsetY
+	muzzleY := p.Y + math.Sin(p.Angle)*muzzleOffsetX + math.Cos(p.Angle)*muzzleOffsetY
+
+	// Create the bullet starting from the muzzle position
 	bullet := &Bullet{
 		OwnerID:   p.ID,
-		X:         p.X,
-		Y:         p.Y,
-		EndX:      p.X + math.Cos(p.Angle+angleRecoil)*BulletSpeed,
-		EndY:      p.Y + math.Sin(p.Angle+angleRecoil)*BulletSpeed,
+		X:         muzzleX,
+		Y:         muzzleY,
+		EndX:      muzzleX + math.Cos(p.Angle+angleRecoil)*BulletSpeed,
+		EndY:      muzzleY + math.Sin(p.Angle+angleRecoil)*BulletSpeed,
 		Direction: p.Angle + angleRecoil,
 		Velocity:  BulletSpeed,
 	}
@@ -255,8 +284,6 @@ func (p *Player) Shoot() {
 func (b *Bullet) Update() {
 	dx := math.Cos(b.Direction) * b.Velocity
 	dy := math.Sin(b.Direction) * b.Velocity
-	b.X += dx
-	b.Y += dy
 	b.EndX += dx
 	b.EndY += dy
 }
@@ -274,10 +301,13 @@ func (b *Bullet) Line() game.Line {
 	}
 }
 
+func DrawMuzzleFlash(screen *ebiten.Image, x, y float64) {
+	vector.DrawFilledCircle(screen, float32(x), float32(y), 5, color.White, false)
+}
+
 func (b *Bullet) Draw(screen *ebiten.Image) {
-	// vector.DrawFilledCircle(screen, float32(b.X), float32(b.Y), 1, color.White, false)
 	// TODO: bulled line dissapears before hitbox
 
 	// vector.StrokeLine(screen, float32(b.X), float32(b.Y), float32(b.EndX+25*math.Cos(b.Direction)), float32(b.EndY+25*math.Sin(b.Direction)), 1.7, color.White, false)
-	vector.StrokeLine(screen, float32(b.X), float32(b.Y), float32(b.EndX), float32(b.EndY), 1.7, color.White, false)
+	vector.StrokeLine(screen, float32(b.EndX-220*math.Cos(b.Direction)), float32(b.EndY-220*math.Sin(b.Direction)), float32(b.EndX), float32(b.EndY), 1.7, color.White, false)
 }
